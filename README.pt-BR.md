@@ -112,7 +112,7 @@ O `token-usage autostart` usa um serviço systemd de usuário para o painel e `~
 
 ### Ícone na barra superior / bandeja
 
-`token-usage tray` coloca um ícone na barra superior (GNOME, KDE), na área de notificação do Windows ou na barra de menus do macOS. O anel mostra a menor cota restante entre todas as ferramentas. Ao clicar, abre um menu com cada cota, os tokens de hoje e do mês por ferramenta e **Abrir painel detalhado**. Se o painel não estiver rodando, o ícone sobe o painel no mesmo processo.
+`token-usage tray` coloca um ícone na barra superior (GNOME, KDE), na área de notificação do Windows ou na barra de menus do macOS. O anel mostra a menor cota restante entre todas as ferramentas. Ao clicar, abre um menu com cada cota, os tokens de hoje e do mês por ferramenta e **Abrir painel detalhado**. Se o painel não estiver rodando, o ícone sobe o painel no mesmo processo. **Avisar quando a cota apertar** (ligado por padrão) manda uma notificação do sistema quando uma cota passa de 80% e de 95% usados e quando a previsão diz que ela acaba antes de renovar, uma vez por janela. Os limites ficam em `notify_at` no `tray.json`.
 
 Em **Mostrar na barra** você escolhe uma cota para aparecer em texto ao lado do ícone (por exemplo `Claude 2%`), em % usado ou restante. A escolha fica em `~/.config/token-usage/tray.json` (`%APPDATA%\token-usage\tray.json` no Windows). No Windows, onde a bandeja não aceita texto, o número aparece dentro do anel.
 
@@ -124,6 +124,7 @@ Precisa de `pystray` e Pillow (`token-usage[tray]`). No Linux também precisa do
 - **Output** do Gemini soma os tokens de raciocínio (`thoughts`). No Codex, `output_tokens` já inclui o raciocínio.
 - **Duplicatas** são removidas: o Claude Code grava várias linhas por resposta, sessões retomadas repetem mensagens e o Codex repete eventos `token_count`.
 - **Premium Copilot** conta só turnos iniciados pelo usuário no Copilot CLI. A cota mensal também inclui uso na IDE e na web.
+- **Previsão** ("nesse ritmo acaba às…"): o servidor guarda as leituras de cota em memória e ajusta uma reta ao % usado da última hora. Só aparece com pelo menos 3 leituras, 10 min de intervalo e 2 pontos percentuais consumidos, e só quando a cota acabaria antes de renovar. As leituras vêm de quem consulta `/api/limits` (página aberta ou ícone na bandeja); depois de reiniciar o servidor, leva uns 10 min para voltar. Enquanto a API de cota estiver limitada (429), não há leituras novas, e a previsão daquela ferramenta pode não aparecer.
 
 ## Privacidade e segurança
 

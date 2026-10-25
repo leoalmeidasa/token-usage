@@ -205,6 +205,18 @@ function until(iso) {
   const when = new Date(iso).toLocaleString('pt-BR', { weekday: d ? 'short' : undefined, hour: '2-digit', minute: '2-digit', day: d > 6 ? '2-digit' : undefined, month: d > 6 ? '2-digit' : undefined });
   return `renova em ${d ? d + ' d ' : ''}${h} h ${String(m).padStart(2, '0')} min (${when})`;
 }
+// previsão do servidor: só aparece quando há ritmo de consumo suficiente na última hora
+function forecast(lim) {
+  if (lim.exhausts_at) {
+    const at = new Date(lim.exhausts_at);
+    if (at > Date.now()) {
+      const hm = at.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      return `<div class="meta err"><span>nesse ritmo acaba às ${hm} (em ${ago((at - Date.now()) / 1000)}), antes de renovar</span></div>`;
+    }
+  }
+  if (lim.rate_pct_h) return `<div class="meta"><span>ritmo ${lim.rate_pct_h.toLocaleString('pt-BR')}%/h · não acaba antes de renovar</span></div>`;
+  return '';
+}
 const level = left => left > 50 ? css('--cwrite') : left > 20 ? '#eed49f' : '#ee99a0';
 
 function renderLimits() {
@@ -240,7 +252,7 @@ function renderLimits() {
         <div class="src"><span class="tag" style="background:${C[src]}"></span>${LABEL[src]}</div>
         <div class="top"><span class="name">${esc(lim.label)}</span><span class="pct">${left.toFixed(left < 10 && left > 0 ? 1 : 0)}%<small> restante</small></span></div>
         <div class="bar"><i style="width:${left}%;background:${level(left)}"></i></div>
-        <div class="meta"><span>${count}</span><span>${until(lim.resets_at)}</span></div>
+        <div class="meta"><span>${count}</span><span>${until(lim.resets_at)}</span></div>${expired ? '' : forecast(lim)}
         <div class="meta"><span>${status}</span></div>${warn}</div>`);
     });
   }

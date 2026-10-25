@@ -31,13 +31,15 @@ GREEN, YELLOW, RED, GRAY = (166, 218, 149), (238, 212, 159), (238, 153, 160), (1
 SHORT = {"claude": "Claude", "copilot": "Copilot", "codex": "Codex", "gemini": "Gemini", "antigravity": "AGY"}
 CONFIG = Path(os.environ.get("APPDATA") or Path.home() / ".config") / "token-usage" / "tray.json"
 LOWEST = "lowest"  # valor especial de "show": a menor cota restante entre todas
+ALERTS = CONFIG.parent / "alerts.json"  # avisos já dados por janela de cota, para não repetir
 
 state = {"limits": {}, "usage": None, "error": None, "updated": None}
 
 
 def load_config() -> dict:
     # show: None (só o anel), LOWEST ou "fonte|rótulo da cota"; mode: "used" ou "remaining"
-    cfg = {"show": None, "mode": "used"}
+    # notify: avisos do sistema; notify_at: % usado que dispara aviso
+    cfg = {"show": None, "mode": "used", "notify": True, "notify_at": [80, 95]}
     try:
         cfg.update(json.loads(CONFIG.read_text(encoding="utf-8")))
     except (OSError, ValueError):
@@ -102,6 +104,15 @@ def lowest() -> float | None:
     return min(vals) if vals else None
 
 
+def exhausts(lim: dict) -> datetime | None:
+    """Horário em que, no ritmo da última hora, a cota acaba antes de renovar (previsão do servidor)."""
+    try:
+        at = datetime.fromisoformat(lim["exhausts_at"].replace("Z", "+00:00"))
+    except (KeyError, AttributeError, ValueError):
+        return None
+    return at if at > datetime.now().astimezone() else None
+
+
 def quotas() -> list[tuple[str, str, dict]]:
     """(chave, nome, cota) de cada janela de cota conhecida, na ordem do painel."""
     return [(f"{src}|{lim['label']}", f"{LABEL.get(src, src)} · {lim['label']}", lim)
@@ -115,13 +126,17 @@ def bar_text() -> str | None:
         return None
     if show == LOWEST:
         left, prefix = lowest(), ""
+        # com a menor cota, avisa do primeiro esgotamento previsto entre todas
+        ends = [at for _, _, lim in quotas() if (at := exhausts(lim))]
+        end = min(ends) if ends else None
     else:
         lim = next((lim for key, _, lim in quotas() if key == show), None)
         left, prefix = (remaining(lim) if lim else None), SHORT.get(show.split("|")[0], "") + " "
+        end = exhausts(lim) if lim else None
     if left is None:
         return f"{prefix}—"
     pct = 100 - left if config.get("mode") == "used" else left
-    return f"{prefix}{pct:.0f}%"
+    return f"{prefix}{pct:.0f}%" + (f" · {end.astimezone():%H:%M}" if end else "")
 
 
 def set_bar_text(icon: pystray.Icon, text: str | None) -> bool:
@@ -130,7 +145,7 @@ def set_bar_text(icon: pystray.Icon, text: str | None) -> bool:
     if ind is not None:
         from gi.repository import GLib
         # o guia reserva a largura máxima e evita a barra pular a cada atualização
-        GLib.idle_add(ind.set_label, text or "", "Copilot 100%" if text else "")
+        GLib.idle_add(ind.set_label, text or "", "Copilot 100% · 00:00" if text else "")
         return True
     item = getattr(icon, "_status_item", None)  # macOS
     if item is not None:
@@ -178,6 +193,60 @@ def usage_lines() -> list[str]:
             for s, a in sorted(by.items(), key=lambda kv: -kv[1][1])]
 
 
+def load_alerts() -> dict:
+    try:
+        return json.loads(ALERTS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def alerts(icon: pystray.Icon):
+    """Avisa uma vez por janela de cota: ao passar de cada limite de notify_at e quando a previsão
+    diz que a cota acaba antes de renovar."""
+    if not config.get("notify", True) or not icon.HAS_NOTIFICATION:
+        return
+    now = time.time()
+    # esquece avisos de janelas que já renovaram
+    sent = {k: v for k, v in load_alerts().items() if v > now}
+    news = []
+    for src, L in state["limits"].items():
+        for lim in L.get("limits") or []:
+            left = remaining(lim)
+            try:
+                reset = datetime.fromisoformat(lim["resets_at"].replace("Z", "+00:00")).timestamp()
+            except (KeyError, AttributeError, ValueError):
+                continue
+            if left is None or reset < now:
+                continue
+            name = f"{LABEL.get(src, src)} · {lim['label']}"
+            win = f"{src}|{lim['label']}|{lim['resets_at'][:13]}"
+            used = 100 - left
+            # só o maior limite cruzado vira aviso; os menores ficam marcados junto
+            crossed = [th for th in sorted(config.get("notify_at") or []) if used >= th]
+            if crossed and f"{win}|{crossed[-1]}" not in sent:
+                news.append((name, f"{used:.0f}% usado · {until(lim['resets_at'])}"))
+                sent.update({f"{win}|{th}": reset for th in crossed})
+            end = exhausts(lim)
+            # previsão que estoura com folga antes da renovação (10 min) vale um aviso
+            if end and reset - end.timestamp() > 600 and f"{win}|eta" not in sent:
+                news.append((name, f"nesse ritmo acaba às {end.astimezone():%H:%M} · {until(lim['resets_at'])}"))
+                sent[f"{win}|eta"] = reset
+    for title, message in news:
+        icon.notify(message, title)
+    if news:
+        try:
+            ALERTS.parent.mkdir(parents=True, exist_ok=True)
+            ALERTS.write_text(json.dumps(sent, indent=2), encoding="utf-8")
+        except OSError as e:
+            print(f"não salvou {ALERTS}: {e}", file=sys.stderr, flush=True)
+
+
+def toggle_notify(icon, _item):
+    config["notify"] = not config.get("notify", True)
+    save_config()
+    icon.update_menu()
+
+
 def show_action(key: str | None):
     def act(icon, _item):
         config["show"] = key
@@ -218,7 +287,9 @@ def menu_items():
                 items.append(info(f"{LABEL.get(src, src)} · {lim['label']}: sem dado atual"))
                 continue
             extra = until(lim.get("resets_at"))
+            end = exhausts(lim)
             items.append(info(f"{LABEL.get(src, src)} · {lim['label']}: {left:.0f}% restante"
+                              + (f" · acaba ~{end.astimezone():%H:%M}" if end else "")
                               + (f" · {extra}" if extra else "")))
         if not L.get("live") and L.get("error"):
             items.append(info(f"{LABEL.get(src, src)}: {L['error'][:90]}"))
@@ -230,6 +301,8 @@ def menu_items():
     items += [pystray.Menu.SEPARATOR,
               pystray.MenuItem("Abrir painel detalhado", lambda: webbrowser.open(URL), default=True),
               pystray.MenuItem("Mostrar na barra", bar_menu()),
+              pystray.MenuItem("Avisar quando a cota apertar", toggle_notify,
+                               checked=lambda _: config.get("notify", True)),
               pystray.MenuItem("Atualizar agora", lambda icon: refresh(icon, force=True)),
               pystray.MenuItem("Sair", lambda icon: icon.stop())]
     return items
@@ -243,6 +316,11 @@ def refresh(icon: pystray.Icon, force: bool = False):
     except Exception as e:  # noqa: BLE001
         state["error"] = str(e)
     redraw(icon)
+    try:
+        alerts(icon)
+    except Exception as e:  # noqa: BLE001
+        # um aviso que falhou não pode parar a atualização do ícone
+        print(f"erro nos avisos: {e!r}", file=sys.stderr, flush=True)
 
 
 def redraw(icon: pystray.Icon):

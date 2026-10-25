@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +44,10 @@ COPILOT_STATE = HOME / ".copilot" / "session-state"
 LIMITS_TTL = 60  # segundos entre consultas às APIs de cota
 LIMITS_MIN = 10  # nem o botão de atualizar consulta as APIs mais que isso
 BACKOFF_MAX = 3600  # teto da espera depois de 429 seguidos
+# previsão de quando a cota acaba: ritmo da última hora, com um mínimo de dados para não alarmar à toa
+FORECAST_LOOKBACK = 3600  # só as leituras desta janela de tempo contam para o ritmo
+FORECAST_SPAN = 600  # precisa de pelo menos 10 min entre a primeira e a última leitura
+FORECAST_MIN_DELTA = 2  # e de pelo menos 2 pontos percentuais consumidos nesse intervalo
 GH = shutil.which("gh") or "/snap/bin/gh"  # systemd não tem /snap/bin no PATH
 # só estes Host são aceitos: bloqueia DNS rebinding de páginas abertas no navegador
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
@@ -728,6 +732,58 @@ def _safe(fn) -> dict:
         return {"live": False, "fetched_at": None, "limits": [], "error": _err(e)}
 
 
+def _epoch(iso: str | None) -> float | None:
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _slope(pts: list[tuple[float, float]]) -> float:
+    """Inclinação por mínimos quadrados: pontos percentuais por segundo."""
+    n = len(pts)
+    mt = sum(t for t, _ in pts) / n
+    mu = sum(u for _, u in pts) / n
+    den = sum((t - mt) ** 2 for t, _ in pts)
+    return sum((t - mt) * (u - mu) for t, u in pts) / den if den else 0.0
+
+
+# "fonte|rótulo" -> leituras (quando, % usado, renovação em epoch); só em memória, refaz em ~10 min
+_samples: dict[str, deque] = {}
+
+
+def _forecast(source: str, res: dict) -> dict:
+    """Guarda a leitura de cada cota e, havendo ritmo de consumo, projeta quando ela chega a 100%.
+
+    Acrescenta rate_pct_h (ritmo da última hora) e, se a cota acabar antes de renovar, exhausts_at.
+    """
+    t, now = res.get("fetched_at"), time.time()
+    for lim in res.get("limits") or []:
+        # fontes que reaproveitam o resultado entre consultas não podem herdar previsão velha
+        lim.pop("rate_pct_h", None)
+        lim.pop("exhausts_at", None)
+        reset, used = _epoch(lim.get("resets_at")), lim.get("used_pct")
+        # cache de uma janela que já renovou não diz nada sobre o ritmo atual
+        if not t or reset is None or reset < now or used is None:
+            continue
+        s = _samples.setdefault(f"{source}|{lim['label']}", deque(maxlen=240))
+        # janela nova: a renovação mudou de lugar ou o uso caiu
+        if s and (abs(s[-1][2] - reset) > 600 or used < s[-1][1] - 1):
+            s.clear()
+        if not s or t > s[-1][0]:
+            s.append((t, used, reset))
+        pts = [(ts, u) for ts, u, _ in s if ts >= t - FORECAST_LOOKBACK]
+        if len(pts) < 3 or pts[-1][0] - pts[0][0] < FORECAST_SPAN or pts[-1][1] - pts[0][1] < FORECAST_MIN_DELTA:
+            continue
+        rate = _slope(pts)
+        if rate <= 0:
+            continue
+        lim["rate_pct_h"] = round(rate * 3600, 1)
+        if used < 100 and (eta := t + (100 - used) / rate) < reset:
+            lim["exhausts_at"] = _iso(eta)
+    return res
+
+
 LIMIT_SOURCES = {"claude": claude_limits, "copilot": copilot_limits, "codex": codex_limits, "antigravity": antigravity_limits}
 _limits_lock = threading.Lock()
 _limits_cache: tuple[float, dict] | None = None
@@ -739,7 +795,7 @@ def limits(force: bool = False) -> dict:
         age = time.time() - _limits_cache[0] if _limits_cache else None
         if age is None or age > LIMITS_TTL or (force and age > LIMITS_MIN):
             # não consulta APIs de ferramentas que o usuário não usa
-            _limits_cache = (time.time(), {k: _mark_stale(_safe(LIMIT_SOURCES[k]))
+            _limits_cache = (time.time(), {k: _forecast(k, _mark_stale(_safe(LIMIT_SOURCES[k])))
                                            for k in installed() if k in LIMIT_SOURCES})
         return _limits_cache[1]
 

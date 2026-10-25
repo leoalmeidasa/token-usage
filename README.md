@@ -112,7 +112,7 @@ On Windows, the `~/.claude`, `~/.copilot` etc. folders live in `%USERPROFILE%`.
 
 ### Top bar / system tray icon
 
-`token-usage tray` adds an icon to the top bar (GNOME, KDE), the Windows notification area or the macOS menu bar. The ring shows the lowest remaining quota across all tools. Clicking it opens a menu with each quota, today's and this month's tokens per tool, and **Open detailed dashboard**. If the dashboard is not running, the icon starts it in the same process.
+`token-usage tray` adds an icon to the top bar (GNOME, KDE), the Windows notification area or the macOS menu bar. The ring shows the lowest remaining quota across all tools. Clicking it opens a menu with each quota, today's and this month's tokens per tool, and **Open detailed dashboard**. If the dashboard is not running, the icon starts it in the same process. **Avisar quando a cota apertar** (on by default) sends a system notification when a quota passes 80% and 95% used and when the forecast says it runs out before resetting, once per window. The thresholds are `notify_at` in `tray.json`.
 
 **Show in bar** picks one quota to display as text next to the icon (for example `Claude 2%`), as % used or % remaining. The choice is saved in `~/.config/token-usage/tray.json` (`%APPDATA%\token-usage\tray.json` on Windows). On Windows, where the tray does not accept text, the number is drawn inside the ring.
 
@@ -124,6 +124,7 @@ It needs `pystray` and Pillow (`token-usage[tray]`). On Linux it also needs PyGO
 - **Output** for Gemini adds the reasoning tokens (`thoughts`). In Codex, `output_tokens` already includes reasoning.
 - **Duplicates** are removed: Claude Code writes several lines per response, resumed sessions repeat messages, and Codex repeats `token_count` events.
 - **Copilot premium** counts only user-initiated turns in Copilot CLI. The monthly quota also includes IDE and web usage.
+- **Forecast** ("at this pace it runs out at…"): the server keeps quota readings in memory and fits a line to the % used over the last hour. It only shows up with at least 3 readings spanning 10 minutes and 2 percentage points used, and only when the quota would run out before resetting. Readings come from whoever polls `/api/limits` (open page or tray icon); after a server restart it takes about 10 minutes to come back. While a quota API is rate limited (429), there are no new readings, so the forecast for that tool may not show up.
 
 ## Privacy and security
 
